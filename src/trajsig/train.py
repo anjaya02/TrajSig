@@ -6,7 +6,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -106,7 +106,17 @@ def _loader(
     )
 
 
-def _train_epoch(model: Any, dataset: Any, optimizer: Any, scaler: Any, cfg: dict[str, Any], seeds: dict[str, int], epoch: int, device: Any):
+def _train_epoch(
+    model: Any,
+    dataset: Any,
+    optimizer: Any,
+    scaler: Any,
+    cfg: dict[str, Any],
+    seeds: dict[str, int],
+    epoch: int,
+    device: Any,
+    on_batch: Callable[[int, int], None] | None = None,
+):
     import torch
 
     model.train()
@@ -124,7 +134,7 @@ def _train_epoch(model: Any, dataset: Any, optimizer: Any, scaler: Any, cfg: dic
     total_examples = 0
     steps = int(cfg["training"]["steps_per_epoch"])
     amp_enabled = bool(cfg["training"]["amp"] and device.type == "cuda")
-    for _ in range(steps):
+    for step in range(1, steps + 1):
         try:
             inputs, labels = next(iterator)
         except StopIteration:
@@ -151,6 +161,8 @@ def _train_epoch(model: Any, dataset: Any, optimizer: Any, scaler: Any, cfg: dic
         total_loss += float(loss.detach().item()) * count
         total_correct += int((logits.detach().argmax(1) == labels).sum().item())
         total_examples += count
+        if on_batch is not None and (step == 1 or step % 50 == 0 or step == steps):
+            on_batch(step, steps)
     return total_loss / total_examples, total_correct / total_examples
 
 
@@ -171,16 +183,27 @@ def _accuracy(model: Any, dataset: Any, cfg: dict[str, Any], device: Any) -> flo
     return correct / count
 
 
-def train_one(config: dict[str, Any], output: str | Path, condition_id: str, seed_id: int, force: bool = False) -> str:
+def train_one(
+    config: dict[str, Any],
+    output: str | Path,
+    condition_id: str,
+    seed_id: int,
+    force: bool = False,
+    run_position: int | None = None,
+    total_runs: int | None = None,
+    completed_before: int = 0,
+) -> str:
     import torch
 
     store = ArtifactStore(output)
     identifier = run_id(config, condition_id, seed_id)
     epochs = int(config["training"]["epochs"])
     if store.is_complete(identifier, epochs) and not force:
-        print(f"SKIP complete run {identifier}", flush=True)
+        print(f"SKIP complete run {run_position or '?'} / {total_runs or '?'}: {condition_id} seed={seed_id}", flush=True)
         return identifier
 
+    label = f"run {run_position or '?'} / {total_runs or '?'}: {condition_id} seed={seed_id}"
+    print(f"SETUP {label}: loading data and building model", flush=True)
     condition = condition_config(config, condition_id)
     seeds = derive_seeds(seed_id)
     seed_everything(seeds["initialization"], bool(config["experiment"]["deterministic"]))
@@ -221,12 +244,43 @@ def train_one(config: dict[str, Any], output: str | Path, condition_id: str, see
         print(f"RESUME {identifier} at epoch {start_epoch + 1}", flush=True)
 
     started_clock = time.perf_counter()
+    total_epochs = (total_runs or 1) * epochs
+    progress_path = store.root / "progress.json"
+    atomic_json(
+        progress_path,
+        {
+            "status": "training",
+            "updated_at": utc_now(),
+            "current_run": run_position,
+            "total_runs": total_runs,
+            "condition": condition_id,
+            "seed_id": int(seed_id),
+            "current_epoch": start_epoch + 1,
+            "epochs_per_run": epochs,
+            "completed_runs": completed_before,
+            "completed_epochs": completed_before * epochs + start_epoch,
+            "total_epochs": total_epochs,
+            "estimated_hours_remaining": None,
+        },
+    )
+    print(f"START {label}: epoch {start_epoch + 1}/{epochs} on {device}", flush=True)
     for epoch in range(start_epoch, epochs):
         # Makes epoch-boundary resume reproduce model-side stochasticity.
         seed_everything(seeds["training"] + epoch, bool(config["experiment"]["deterministic"]))
         epoch_start = snapshot_parameters(model, int(config["telemetry"]["parameter_min_ndim"]))
         learning_rate = float(optimizer.param_groups[0]["lr"])
-        train_loss, train_accuracy = _train_epoch(model, bundle.train, optimizer, scaler, config, seeds, epoch, device)
+        epoch_clock = time.perf_counter()
+
+        def on_batch(step: int, steps: int) -> None:
+            print(
+                f"BATCH {label} epoch {epoch + 1}/{epochs} "
+                f"step {step}/{steps} elapsed={time.perf_counter() - epoch_clock:.0f}s",
+                flush=True,
+            )
+
+        train_loss, train_accuracy = _train_epoch(
+            model, bundle.train, optimizer, scaler, config, seeds, epoch, device, on_batch=on_batch
+        )
         test_accuracy = _accuracy(model, bundle.test, config, device)
         snap = collect_telemetry(
             model,
@@ -256,9 +310,32 @@ def train_one(config: dict[str, Any], output: str | Path, condition_id: str, see
             "elapsed_seconds_accumulated": elapsed_before + (time.perf_counter() - started_clock),
         }
         _atomic_torch_save(state, checkpoint)
+        completed_epochs = completed_before * epochs + epoch + 1
+        elapsed_epoch = time.perf_counter() - epoch_clock
+        estimated_hours = elapsed_epoch * max(total_epochs - completed_epochs, 0) / 3600
+        atomic_json(
+            progress_path,
+            {
+                "status": "training",
+                "updated_at": utc_now(),
+                "current_run": run_position,
+                "total_runs": total_runs,
+                "condition": condition_id,
+                "seed_id": int(seed_id),
+                "current_epoch": epoch + 1,
+                "epochs_per_run": epochs,
+                "completed_runs": completed_before,
+                "completed_epochs": completed_epochs,
+                "total_epochs": total_epochs,
+                "last_epoch_seconds": round(elapsed_epoch, 1),
+                "estimated_hours_remaining": round(estimated_hours, 1),
+            },
+        )
         print(
-            f"RUN {identifier} epoch {epoch + 1:02d}/{epochs} "
-            f"loss={train_loss:.4f} train_acc={train_accuracy:.3f} test_acc={test_accuracy:.3f}",
+            f"PROGRESS {completed_epochs}/{total_epochs} epochs ({completed_epochs / total_epochs:.1%}); "
+            f"{label} epoch {epoch + 1}/{epochs} saved; "
+            f"loss={train_loss:.4f} train_acc={train_accuracy:.3f} test_acc={test_accuracy:.3f}; "
+            f"rough ETA={estimated_hours:.1f}h",
             flush=True,
         )
 
@@ -300,7 +377,45 @@ def train_all(config: dict[str, Any], output: str | Path, force: bool = False) -
     store = ArtifactStore(output)
     atomic_json(store.root / "experiment_config.json", {k: v for k, v in config.items() if not k.startswith("_")})
     identifiers: list[str] = []
-    for condition in config["conditions"]:
-        for seed_id in config["experiment"]["seed_ids"]:
-            identifiers.append(train_one(config, output, condition["id"], int(seed_id), force=force))
+    planned = [
+        (condition["id"], int(seed_id))
+        for condition in config["conditions"]
+        for seed_id in config["experiment"]["seed_ids"]
+    ]
+    total_runs = len(planned)
+    completed = sum(
+        store.is_complete(run_id(config, condition_id, seed_id), int(config["training"]["epochs"]))
+        for condition_id, seed_id in planned
+    ) if not force else 0
+    print(f"EXPERIMENT {completed}/{total_runs} runs complete; output={store.root.resolve()}", flush=True)
+    for position, (condition_id, seed_id) in enumerate(planned, start=1):
+        identifier = run_id(config, condition_id, seed_id)
+        was_complete = store.is_complete(identifier, int(config["training"]["epochs"])) and not force
+        identifiers.append(
+            train_one(
+                config,
+                output,
+                condition_id,
+                seed_id,
+                force=force,
+                run_position=position,
+                total_runs=total_runs,
+                completed_before=completed,
+            )
+        )
+        if not was_complete:
+            completed += 1
+    atomic_json(
+        store.root / "progress.json",
+        {
+            "status": "training_complete",
+            "updated_at": utc_now(),
+            "completed_runs": total_runs,
+            "total_runs": total_runs,
+            "completed_epochs": total_runs * int(config["training"]["epochs"]),
+            "total_epochs": total_runs * int(config["training"]["epochs"]),
+            "estimated_hours_remaining": 0,
+        },
+    )
+    print(f"TRAINING COMPLETE: {total_runs}/{total_runs} runs", flush=True)
     return identifiers

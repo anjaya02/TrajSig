@@ -1,0 +1,90 @@
+experiment:
+  name: cifar10_resnet18_phase0
+  phase: full
+  seed_ids: [0, 1, 2, 3, 4]
+  deterministic: true
+
+data:
+  kind: cifar10
+  root: data/cifar10
+  download: true
+  num_workers: 2
+  pin_memory: true
+  c5_classes: [0, 1]
+  c5_keep_fraction: 0.5
+
+training:
+  architecture: resnet18_cifar
+  epochs: 30
+  batch_size: 128
+  eval_batch_size: 256
+  steps_per_epoch: 390
+  weight_decay: 0.0005
+  checkpoint_every: 1
+  amp: true
+
+conditions:
+  - id: C0
+    description: SGD with cosine learning-rate decay
+    optimizer: sgd
+    learning_rate: 0.1
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.0
+  - id: C1
+    description: AdamW with cosine learning-rate decay
+    optimizer: adamw
+    learning_rate: 0.001
+    schedule: cosine
+    label_corruption: 0.0
+  - id: C2
+    description: SGD with step-decay learning-rate dynamics
+    optimizer: sgd
+    learning_rate: 0.1
+    momentum: 0.9
+    schedule: step
+    schedule_milestones: [10, 20]
+    schedule_gamma: 0.1
+    label_corruption: 0.0
+  - id: C3
+    description: Baseline training with deterministic 10 percent symmetric label corruption
+    optimizer: sgd
+    learning_rate: 0.1
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.1
+  - id: C4
+    description: Baseline training with deterministic 20 percent symmetric label corruption
+    optimizer: sgd
+    learning_rate: 0.1
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.2
+  - id: C5
+    description: Baseline training with half of classes 0 and 1 examples removed; fixed update count
+    optimizer: sgd
+    learning_rate: 0.1
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.0
+    data_composition: c5_subset
+
+telemetry:
+  parameter_min_ndim: 2
+  near_zero_threshold: 1.0e-12
+  gini_max_samples: 4096
+  stats: [weight_l2, gradient_l2, update_l2, update_weight_ratio, gradient_mean, gradient_std, near_zero_fraction, gradient_gini]
+
+analysis:
+  trajectory_kinds: [global, stage_update_ratios]
+  metric_sets: [internal, internal_plus_metrics]
+  downsample_points: 8
+  signature_depths: [1, 2, 3, 4]
+  signature_families: [signature, logsignature]
+  time_augmentation: [false, true]
+  temporal_orders: [normal, reversed, shuffle_0, shuffle_1, shuffle_2]
+  classifier: logistic_regression
+  classifier_c: 1.0
+  max_iter: 5000
+  max_representation_features: 200000
+  random_seed: 731

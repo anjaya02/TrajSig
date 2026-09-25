@@ -1,0 +1,71 @@
+experiment:
+  name: synthetic_tiny_smoke
+  phase: smoke
+  seed_ids: [0, 1]
+  deterministic: true
+
+data:
+  kind: synthetic
+  root: data/synthetic
+  train_size: 192
+  test_size: 96
+  image_size: 16
+  num_classes: 4
+  dataset_seed: 919
+  download: false
+  num_workers: 0
+  pin_memory: false
+  c5_classes: [0, 1]
+  c5_keep_fraction: 0.5
+
+training:
+  architecture: tiny_cnn
+  epochs: 3
+  batch_size: 64
+  eval_batch_size: 96
+  steps_per_epoch: 3
+  weight_decay: 0.0005
+  checkpoint_every: 1
+  amp: false
+
+conditions:
+  - id: C0
+    description: smoke SGD cosine
+    optimizer: sgd
+    learning_rate: 0.05
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.0
+  - id: C1
+    description: smoke AdamW cosine
+    optimizer: adamw
+    learning_rate: 0.003
+    schedule: cosine
+    label_corruption: 0.0
+  - id: C3
+    description: smoke 10 percent corruption
+    optimizer: sgd
+    learning_rate: 0.05
+    momentum: 0.9
+    schedule: cosine
+    label_corruption: 0.1
+
+telemetry:
+  parameter_min_ndim: 2
+  near_zero_threshold: 1.0e-12
+  gini_max_samples: 4096
+  stats: [weight_l2, gradient_l2, update_l2, update_weight_ratio, gradient_mean, gradient_std, near_zero_fraction, gradient_gini]
+
+analysis:
+  trajectory_kinds: [global]
+  metric_sets: [internal, internal_plus_metrics]
+  downsample_points: 3
+  signature_depths: [1, 2]
+  signature_families: [signature, logsignature]
+  time_augmentation: [false, true]
+  temporal_orders: [normal, reversed, shuffle_0]
+  classifier: logistic_regression
+  classifier_c: 1.0
+  max_iter: 2000
+  max_representation_features: 200000
+  random_seed: 731

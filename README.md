@@ -58,14 +58,14 @@ This machine has no suitable local GPU. Use [notebooks/phase0_colab.ipynb](noteb
 
 1. Upload `phase0_colab.ipynb` to Google Colab and open it.
 2. Select **Runtime → Change runtime type → T4 GPU**.
-3. Run all cells. Authorize the Google Drive mount.
+3. Run all cells. Authorize the Google Drive mount. The setup cell prints the downloaded source ZIP's SHA-256 hash and rejects a stale bundle.
 4. The notebook downloads the current `phase0_source.zip` from this repository. If GitHub is unavailable, upload the ZIP when prompted.
-5. Leave the output directory at `MyDrive/trajsig_phase0_results`. A disconnected session can be resumed by running all cells again; complete runs are skipped and an interrupted run resumes at its last epoch checkpoint.
+5. Leave the output directory at `MyDrive/trajsig_phase0_results`. A disconnected session can be resumed by running all cells again; complete runs are skipped and an interrupted run resumes at its last saved epoch checkpoint. Work after the last saved epoch must repeat.
 6. Wait for all 30 runs and the audit to complete.
 7. Download `phase0_training_artifacts.zip` from the displayed Drive path.
 8. Return exactly that archive to this repository/conversation. Stage 5 will regenerate fold-specific representations and perform the scientific analysis here.
 
-The notebook refuses to train without CUDA and prints the actual device. It prints the current run and a batch count every 50 training steps, then an overall epoch count and rough ETA after each saved epoch. `MyDrive/trajsig_phase0_results/progress.json` records the last saved epoch so you can check progress in Drive. A checkpoint protects an in-progress run at every epoch boundary. Closing Colab can interrupt execution; reopen it and run all cells to resume.
+The notebook refuses to train without CUDA and prints the actual device. It prints startup status, a heartbeat every 60 seconds, the current run and a batch count every 50 training steps, then an overall epoch count and rough ETA after each saved epoch. `MyDrive/trajsig_phase0_results/progress.json` records stages such as `checking_saved_runs`, `setting_up_run`, and `training`, as well as the last saved epoch. A checkpoint protects an in-progress run at every epoch boundary. Closing Colab or losing its runtime can interrupt execution; reopen it and run all cells to resume. Colab runtime availability is controlled by Google and cannot be guaranteed by the notebook.
 
 ## Manual commands
 

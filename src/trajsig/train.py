@@ -192,18 +192,33 @@ def train_one(
     run_position: int | None = None,
     total_runs: int | None = None,
     completed_before: int = 0,
+    known_complete: bool | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> str:
     import torch
 
-    store = ArtifactStore(output)
+    store = artifact_store if artifact_store is not None else ArtifactStore(output)
     identifier = run_id(config, condition_id, seed_id)
     epochs = int(config["training"]["epochs"])
-    if store.is_complete(identifier, epochs) and not force:
+    if (store.is_complete(identifier, epochs) if known_complete is None else known_complete) and not force:
         print(f"SKIP complete run {run_position or '?'} / {total_runs or '?'}: {condition_id} seed={seed_id}", flush=True)
         return identifier
 
     label = f"run {run_position or '?'} / {total_runs or '?'}: {condition_id} seed={seed_id}"
     print(f"SETUP {label}: loading data and building model", flush=True)
+    atomic_json(
+        store.root / "progress.json",
+        {
+            "status": "setting_up_run",
+            "updated_at": utc_now(),
+            "current_run": run_position,
+            "total_runs": total_runs,
+            "condition": condition_id,
+            "seed_id": int(seed_id),
+            "completed_runs": completed_before,
+            "total_epochs": (total_runs or 1) * epochs,
+        },
+    )
     condition = condition_config(config, condition_id)
     seeds = derive_seeds(seed_id)
     seed_everything(seeds["initialization"], bool(config["experiment"]["deterministic"]))
@@ -383,14 +398,25 @@ def train_all(config: dict[str, Any], output: str | Path, force: bool = False) -
         for seed_id in config["experiment"]["seed_ids"]
     ]
     total_runs = len(planned)
-    completed = sum(
-        store.is_complete(run_id(config, condition_id, seed_id), int(config["training"]["epochs"]))
+    # A mounted Drive can take many seconds per missing-file lookup. List the
+    # manifest directory once, then validate only runs with a saved manifest.
+    print(f"CHECKING saved runs in {store.manifest_dir}", flush=True)
+    atomic_json(
+        store.root / "progress.json",
+        {"status": "checking_saved_runs", "updated_at": utc_now(), "total_runs": total_runs},
+    )
+    saved_manifest_ids = {path.stem for path in store.manifest_dir.glob("*.json")} if not force else set()
+    complete_ids = {
+        identifier
         for condition_id, seed_id in planned
-    ) if not force else 0
+        if (identifier := run_id(config, condition_id, seed_id)) in saved_manifest_ids
+        and store.is_complete(identifier, int(config["training"]["epochs"]))
+    }
+    completed = len(complete_ids)
     print(f"EXPERIMENT {completed}/{total_runs} runs complete; output={store.root.resolve()}", flush=True)
     for position, (condition_id, seed_id) in enumerate(planned, start=1):
         identifier = run_id(config, condition_id, seed_id)
-        was_complete = store.is_complete(identifier, int(config["training"]["epochs"])) and not force
+        was_complete = identifier in complete_ids
         identifiers.append(
             train_one(
                 config,
@@ -401,6 +427,8 @@ def train_all(config: dict[str, Any], output: str | Path, force: bool = False) -
                 run_position=position,
                 total_runs=total_runs,
                 completed_before=completed,
+                known_complete=was_complete,
+                artifact_store=store,
             )
         )
         if not was_complete:
